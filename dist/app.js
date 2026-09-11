@@ -448,7 +448,10 @@ function buildBankContent() {
   writeInt("Ora3", "number", bank.equipped[2]);
   bank.auraLevels.forEach((level, index) => writeInt(`OOra${index + 1}`, "number", level));
   writeInt("HU", "number", hu);
-  const serialized = new XMLSerializer().serializeToString(bank.document);
+  // Serialize only the Bank root. Serializing the whole XMLDocument preserves
+  // its existing processing instruction, which would duplicate the declaration
+  // that we add below and make StarCraft II reject the file as invalid XML.
+  const serialized = new XMLSerializer().serializeToString(bank.document.documentElement);
   return { content: `<?xml version="1.0" encoding="utf-8"?>\r\n${serialized}`, hu, info };
 }
 
