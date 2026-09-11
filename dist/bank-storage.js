@@ -57,6 +57,10 @@ export function putBankSlot(slot) {
   return runRequest("readwrite", (store) => store.put(slot));
 }
 
+export function deleteBankSlot(id) {
+  return runRequest("readwrite", (store) => store.delete(id));
+}
+
 export function createSlotId() {
   if (crypto.randomUUID) return crypto.randomUUID();
   return `slot-${Date.now()}-${Math.random().toString(36).slice(2)}`;

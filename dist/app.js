@@ -1,4 +1,4 @@
-import { createSlotId, getBankSlot, listBankSlots, putBankSlot } from "./bank-storage.js";
+import { createSlotId, deleteBankSlot, getBankSlot, listBankSlots, putBankSlot } from "./bank-storage.js";
 
 const AURA_NAMES = [
   "진짜 함대", "깊은 뿌리", "내가 이 구역의 쪼신", "품질 향상", "누구보다 빠르고 정확하게",
@@ -75,7 +75,7 @@ app.innerHTML = `
       <section id="slotsPanel" class="slots-panel panel" aria-labelledby="slotsTitle">
         <div class="section-heading compact">
           <div><p class="eyebrow">LOCAL BANK SLOTS</p><h2 id="slotsTitle">저장 슬롯</h2></div>
-          <span>이 브라우저에 자동 저장됩니다</span>
+          <span>수정 내용과 적용 전 원본이 이 브라우저에 저장됩니다</span>
         </div>
         <div id="slotGrid" class="slot-grid"></div>
         <div id="emptySlots" class="empty-slots">아직 저장된 Bank가 없습니다. 원본 파일을 연결하면 첫 슬롯이 만들어집니다.</div>
@@ -154,7 +154,7 @@ app.innerHTML = `
           <div>
             <p class="eyebrow">APPLY TO ORIGINAL</p>
             <h2>연결된 원본 파일에 바로 적용</h2>
-            <p id="saveHelp">수정 내용은 슬롯에 자동 저장됩니다. 원본에 적용하면 연결된 SC2Bank 파일을 직접 대체합니다.</p>
+            <p id="saveHelp">원본에 적용하기 직전 현재 파일을 백업 슬롯에 저장한 뒤 연결된 SC2Bank 파일을 직접 대체합니다.</p>
           </div>
           <label class="account-field">
             <span>계정 번호 <small>선택</small></span>
@@ -413,17 +413,27 @@ function slotFingerprint(name = fileName, residue = checksumResidue) {
 
 function renderSlots() {
   ui.emptySlots.hidden = slotRecords.length > 0;
-  ui.slotGrid.innerHTML = slotRecords.map((slot, index) => `
-    <article class="slot-card ${slot.id === activeSlotId ? "active" : ""}">
-      <div class="slot-index">${escapeHtml(slot.label ?? `SLOT ${String(index + 1).padStart(2, "0")}`)}</div>
+  ui.slotGrid.innerHTML = slotRecords.map((slot, index) => {
+    const isBackup = slot.kind === "backup";
+    const fallbackLabel = isBackup ? "AUTO BACKUP" : `SLOT ${String(index + 1).padStart(2, "0")}`;
+    const label = slot.label ?? fallbackLabel;
+    const visibleLabel = isBackup ? "BACKUP" : label;
+    const backupStamp = isBackup && label.startsWith("BACKUP ") ? `${label.slice(7)} · ` : "";
+    return `
+    <article class="slot-card ${slot.id === activeSlotId ? "active" : ""} ${isBackup ? "backup" : ""}">
+      <div class="slot-index">${escapeHtml(visibleLabel)}</div>
       <div class="slot-main">
         <strong>${escapeHtml(slot.fileName)}</strong>
-        <span>${number(slot.currentPoints ?? 0)}P · 오라 ${slot.ownedCount ?? 0}/90 · HU ${slot.hu ?? "—"}</span>
+        <span>${escapeHtml(backupStamp)}${number(slot.currentPoints ?? 0)}P · 오라 ${slot.ownedCount ?? 0}/90 · HU ${slot.hu ?? "—"}</span>
       </div>
-      <div class="slot-link ${slot.hasFileHandle ? "linked" : ""}">${slot.hasFileHandle ? "원본 연결" : "브라우저 저장"}</div>
-      <button type="button" data-open-slot="${escapeHtml(slot.id)}">불러오기</button>
+      <div class="slot-link ${slot.hasFileHandle ? "linked" : ""}">${isBackup ? "적용 전 원본" : (slot.hasFileHandle ? "원본 연결" : "브라우저 저장")}</div>
+      <div class="slot-actions">
+        <button type="button" class="slot-open" data-open-slot="${escapeHtml(slot.id)}">${isBackup ? "복원" : "불러오기"}</button>
+        <button type="button" class="slot-delete" data-delete-slot="${escapeHtml(slot.id)}" aria-label="${escapeHtml(label)} 삭제">삭제</button>
+      </div>
     </article>
-  `).join("");
+  `;
+  }).join("");
 }
 
 async function refreshSlots() {
@@ -495,6 +505,55 @@ async function saveActiveSlot() {
   renderSlots();
 }
 
+function backupLabel(date = new Date()) {
+  const twoDigits = (value) => String(value).padStart(2, "0");
+  return `BACKUP ${twoDigits(date.getMonth() + 1)}.${twoDigits(date.getDate())} ${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}:${twoDigits(date.getSeconds())}`;
+}
+
+async function createOriginalBackup(handle) {
+  const sourceFile = await handle.getFile();
+  const sourceText = await sourceFile.text();
+  const snapshot = parseBank(sourceText);
+  const info = derived(snapshot);
+  const residue = getAccountResidue(snapshot);
+  const now = Date.now();
+  const record = {
+    id: createSlotId(),
+    kind: "backup",
+    sourceSlotId: activeSlotId,
+    label: backupLabel(new Date(now)),
+    fingerprint: slotFingerprint(sourceFile.name, residue),
+    fileName: sourceFile.name,
+    bankText: sourceText,
+    fileHandle: null,
+    hasFileHandle: false,
+    currentPoints: snapshot.currentPoints,
+    totalPoints: info.totalPoints,
+    ownedCount: info.ownedCount,
+    drawCount: info.drawCount,
+    hu: snapshot.storedHU,
+    updatedAt: now
+  };
+  await putBankSlot(record);
+  return record;
+}
+
+async function removeSlot(id) {
+  const slot = slotRecords.find((record) => record.id === id);
+  if (!slot) throw new Error("삭제할 슬롯을 찾을 수 없습니다.");
+  const label = slot.label ?? (slot.kind === "backup" ? "자동 백업" : "저장 슬롯");
+  if (!window.confirm(`${label}을 삭제할까요?\n삭제한 슬롯은 복구할 수 없습니다.`)) return;
+  await deleteBankSlot(id);
+  if (activeSlotId === id) {
+    activeSlotId = null;
+    activeFileHandle = null;
+    updateSummary();
+  }
+  slotRecords = await listBankSlots();
+  renderSlots();
+  showToast(`${label}을 삭제했습니다.`);
+}
+
 async function openFile(file, handle = null) {
   ui.error.hidden = true;
   if (!file) return;
@@ -507,7 +566,7 @@ async function openFile(file, handle = null) {
     const parsed = parseBank(text);
     const residue = getAccountResidue(parsed);
     const fingerprint = slotFingerprint(file.name, residue);
-    const existing = slotRecords.find((slot) => slot.fingerprint === fingerprint);
+    const existing = slotRecords.find((slot) => slot.kind !== "backup" && slot.fingerprint === fingerprint);
     loadBankText(text, file.name, {
       slotId: existing?.id ?? createSlotId(),
       handle: handle ?? existing?.fileHandle ?? null
@@ -547,9 +606,15 @@ function loadBankText(text, name = "ACKOPPPPL32Q.SC2Bank", options = {}) {
 async function openSlot(id) {
   const slot = await getBankSlot(id);
   if (!slot) throw new Error("저장 슬롯을 찾을 수 없습니다.");
-  loadBankText(slot.bankText, slot.fileName, { slotId: slot.id, handle: slot.fileHandle ?? null });
-  renderSlots();
-  showToast(`${slot.label}을 불러왔습니다.`);
+  if (slot.kind === "backup") {
+    loadBankText(slot.bankText, slot.fileName, { slotId: createSlotId(), handle: null });
+    await saveActiveSlot();
+    showToast(`${slot.label}을 새 슬롯으로 복원했습니다.`);
+  } else {
+    loadBankText(slot.bankText, slot.fileName, { slotId: slot.id, handle: slot.fileHandle ?? null });
+    renderSlots();
+    showToast(`${slot.label}을 불러왔습니다.`);
+  }
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -599,6 +664,7 @@ async function applyToOriginal() {
     const handle = activeFileHandle ?? await connectHandleForCurrentBank();
     if (!await ensureWritePermission(handle)) throw new Error("원본 파일 쓰기 권한이 필요합니다.");
     const built = buildBankContent();
+    await createOriginalBackup(handle);
     const writable = await handle.createWritable();
     await writable.write(new Blob([built.content], { type: "application/xml;charset=utf-8" }));
     await writable.close();
@@ -607,7 +673,7 @@ async function applyToOriginal() {
     dirty = false;
     await saveActiveSlot();
     updateSummary();
-    showToast(`HU ${built.hu} · 원본 Bank에 바로 적용했습니다.`);
+    showToast(`HU ${built.hu} · 원본 적용 전 자동 백업을 만들었습니다.`);
   } catch (error) {
     if (error?.name !== "AbortError") showError(error instanceof Error ? error.message : "원본 파일에 적용하지 못했습니다.");
   }
@@ -662,6 +728,11 @@ ui.download.addEventListener("click", saveBank);
 ui.apply.addEventListener("click", applyToOriginal);
 ui.reset.addEventListener("click", resetBank);
 ui.slotGrid.addEventListener("click", (event) => {
+  const deleteButton = event.target.closest("button[data-delete-slot]");
+  if (deleteButton) {
+    removeSlot(deleteButton.dataset.deleteSlot).catch((error) => showError(error.message));
+    return;
+  }
   const button = event.target.closest("button[data-open-slot]");
   if (!button) return;
   openSlot(button.dataset.openSlot).catch((error) => showError(error.message));

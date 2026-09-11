@@ -150,14 +150,20 @@ main { padding-top: 20px; }
   background: rgba(6, 17, 28, .72);
 }
 .slot-card.active { border-color: var(--cyan); box-shadow: inset 3px 0 var(--cyan); }
+.slot-card.backup { border-color: rgba(255, 180, 46, .42); background: rgba(31, 24, 13, .5); }
+.slot-card.backup .slot-index { color: var(--amber); }
 .slot-index { align-self: stretch; display: grid; place-items: center; padding: 14px; border-right: 1px solid var(--line); color: var(--cyan); font: 700 .68rem "JetBrains Mono", monospace; letter-spacing: .08em; }
 .slot-main { min-width: 0; display: flex; flex-direction: column; gap: 5px; padding: 13px; }
 .slot-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 .76rem "JetBrains Mono", monospace; }
 .slot-main span { color: var(--muted); font-size: .72rem; }
 .slot-link { margin-right: 10px; color: #7991a3; font-size: .7rem; white-space: nowrap; }
 .slot-link.linked { color: #8edbd3; }
-.slot-card > button { align-self: stretch; min-width: 78px; border: 0; border-left: 1px solid var(--line); color: #b8cbd8; background: #102237; font-size: .78rem; font-weight: 700; }
-.slot-card > button:hover { color: #07111f; background: var(--cyan); }
+.slot-actions { align-self: stretch; display: grid; grid-template-columns: auto auto; }
+.slot-actions button { min-width: 62px; border: 0; border-left: 1px solid var(--line); color: #b8cbd8; background: #102237; font-size: .76rem; font-weight: 700; }
+.slot-actions .slot-open:hover { color: #07111f; background: var(--cyan); }
+.slot-actions .slot-delete { min-width: 48px; color: #aab8c3; background: #0b1928; }
+.slot-actions .slot-delete:hover { color: #fff; background: #9c3b40; }
+.slot-card.backup .slot-actions .slot-open:hover { background: var(--amber); }
 .empty-slots { padding: 28px 18px; border: 1px dashed var(--line); color: var(--muted); text-align: center; font-size: .86rem; }
 .file-strip { min-height: 70px; display: grid; grid-template-columns: minmax(250px, 2fr) 1fr 1fr minmax(210px, 1.25fr) auto; align-items: stretch; }
 .file-strip > * { display: flex; flex-direction: column; justify-content: center; padding: 12px 18px; border-right: 1px solid var(--line); }
