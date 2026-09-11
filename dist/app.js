@@ -1,3 +1,5 @@
+import { createSlotId, getBankSlot, listBankSlots, putBankSlot } from "./bank-storage.js";
+
 const AURA_NAMES = [
   "진짜 함대", "깊은 뿌리", "내가 이 구역의 쪼신", "품질 향상", "누구보다 빠르고 정확하게",
   "주는 대로 가는 사람", "압도 그잡채", "주사 맞으면 다 나아", "부식", "마법 회랑",
@@ -37,6 +39,10 @@ let checksumResidue = null;
 let dirty = false;
 let filter = "all";
 let query = "";
+let activeSlotId = null;
+let activeFileHandle = null;
+let slotRecords = [];
+let slotSaveTimer = null;
 
 app.innerHTML = `
   <div class="app-shell">
@@ -60,7 +66,19 @@ app.innerHTML = `
           <h2 id="dropTitle">뱅크 파일을 여기에 놓으세요</h2>
           <p><code>ACKOPPPPL32Q.SC2Bank</code> 파일을 드래그하거나 직접 선택하세요.</p>
         </div>
-        <button id="chooseButton" class="button primary" type="button">파일 선택</button>
+        <div class="drop-actions">
+          <button id="chooseButton" class="button primary" type="button">원본 파일 연결</button>
+          <button id="importButton" class="button ghost" type="button">사본 불러오기</button>
+        </div>
+      </section>
+
+      <section id="slotsPanel" class="slots-panel panel" aria-labelledby="slotsTitle">
+        <div class="section-heading compact">
+          <div><p class="eyebrow">LOCAL BANK SLOTS</p><h2 id="slotsTitle">저장 슬롯</h2></div>
+          <span>이 브라우저에 자동 저장됩니다</span>
+        </div>
+        <div id="slotGrid" class="slot-grid"></div>
+        <div id="emptySlots" class="empty-slots">아직 저장된 Bank가 없습니다. 원본 파일을 연결하면 첫 슬롯이 만들어집니다.</div>
       </section>
 
       <div id="errorBox" class="notice error" role="alert" hidden></div>
@@ -134,9 +152,9 @@ app.innerHTML = `
 
         <section class="save-panel panel">
           <div>
-            <p class="eyebrow">SAVE BANK</p>
-            <h2>체크섬까지 자동으로 맞춰 저장</h2>
-            <p id="saveHelp">기존 HU에서 계정 기여값을 보존합니다. 필요하면 계정 번호를 직접 입력할 수 있습니다.</p>
+            <p class="eyebrow">APPLY TO ORIGINAL</p>
+            <h2>연결된 원본 파일에 바로 적용</h2>
+            <p id="saveHelp">수정 내용은 슬롯에 자동 저장됩니다. 원본에 적용하면 연결된 SC2Bank 파일을 직접 대체합니다.</p>
           </div>
           <label class="account-field">
             <span>계정 번호 <small>선택</small></span>
@@ -144,9 +162,13 @@ app.innerHTML = `
           </label>
           <div class="save-actions">
             <button id="resetButton" class="button ghost" type="button" disabled>원본으로 되돌리기</button>
-            <button id="downloadButton" class="button primary download" type="button">
+            <button id="downloadButton" class="button ghost download" type="button">
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14"/></svg>
-              수정본 다운로드
+              사본 다운로드
+            </button>
+            <button id="applyButton" class="button primary apply" type="button">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12.5 9.2 17 19 7"/></svg>
+              <span id="applyLabel">원본에 적용</span>
             </button>
           </div>
         </section>
@@ -159,14 +181,15 @@ app.innerHTML = `
 
 const $ = (selector) => document.querySelector(selector);
 const ui = {
-  fileInput: $("#fileInput"), choose: $("#chooseButton"), changeFile: $("#changeFileButton"),
+  fileInput: $("#fileInput"), choose: $("#chooseButton"), importButton: $("#importButton"), changeFile: $("#changeFileButton"),
   dropPanel: $("#dropPanel"), workspace: $("#workspace"), error: $("#errorBox"),
+  slotsPanel: $("#slotsPanel"), slotGrid: $("#slotGrid"), emptySlots: $("#emptySlots"),
   loadedFileName: $("#loadedFileName"), schema: $("#schemaValue"), checksum: $("#checksumValue"),
   fileStateText: $("#fileStateText"), tier: $("#tierInput"), points: $("#pointsInput"), pointLimit: $("#pointLimit"),
   owned: $("#ownedMetric"), draw: $("#drawMetric"), spent: $("#spentMetric"), total: $("#totalMetric"),
   ora: [$("#ora1"), $("#ora2"), $("#ora3")], search: $("#searchInput"), bulk: $("#bulkInput"),
   auraGrid: $("#auraGrid"), emptyAuras: $("#emptyAuras"), auraCount: $("#auraCount"),
-  account: $("#accountInput"), reset: $("#resetButton"), download: $("#downloadButton"),
+  account: $("#accountInput"), reset: $("#resetButton"), download: $("#downloadButton"), apply: $("#applyButton"), applyLabel: $("#applyLabel"),
   overlay: $("#dropOverlay"), toast: $("#toast")
 };
 
@@ -328,13 +351,16 @@ function updateSummary() {
   ui.pointLimit.textContent = `현재 구성 안전 상한 ${number(cap)}P`;
   ui.points.max = String(cap);
   ui.checksum.textContent = String(calculateHU()).padStart(4, "0");
-  ui.fileStateText.textContent = dirty ? "수정 중 · 아직 저장하지 않음" : "원본 구조 확인";
+  ui.fileStateText.textContent = dirty ? "슬롯 저장됨 · 원본 미적용" : "원본 파일과 동기화됨";
   ui.reset.disabled = !dirty;
+  ui.applyLabel.textContent = activeFileHandle ? "원본에 적용" : "원본 연결 후 적용";
 }
 
 function markDirty() {
   dirty = true;
   updateSummary();
+  clearTimeout(slotSaveTimer);
+  slotSaveTimer = setTimeout(() => saveActiveSlot().catch(() => {}), 450);
 }
 
 function renderAuras() {
@@ -371,7 +397,98 @@ function loadStateIntoUI() {
   updateSummary();
 }
 
-async function openFile(file) {
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+  })[character]);
+}
+
+function slotFingerprint(name = fileName, residue = checksumResidue) {
+  return `${String(name).toLocaleLowerCase("en")}:${residue}`;
+}
+
+function renderSlots() {
+  ui.emptySlots.hidden = slotRecords.length > 0;
+  ui.slotGrid.innerHTML = slotRecords.map((slot, index) => `
+    <article class="slot-card ${slot.id === activeSlotId ? "active" : ""}">
+      <div class="slot-index">${escapeHtml(slot.label ?? `SLOT ${String(index + 1).padStart(2, "0")}`)}</div>
+      <div class="slot-main">
+        <strong>${escapeHtml(slot.fileName)}</strong>
+        <span>${number(slot.currentPoints ?? 0)}P · 오라 ${slot.ownedCount ?? 0}/90 · HU ${slot.hu ?? "—"}</span>
+      </div>
+      <div class="slot-link ${slot.hasFileHandle ? "linked" : ""}">${slot.hasFileHandle ? "원본 연결" : "브라우저 저장"}</div>
+      <button type="button" data-open-slot="${escapeHtml(slot.id)}">불러오기</button>
+    </article>
+  `).join("");
+}
+
+async function refreshSlots() {
+  try {
+    slotRecords = await listBankSlots();
+    renderSlots();
+  } catch {
+    ui.emptySlots.textContent = "이 브라우저에서 저장 슬롯을 사용할 수 없습니다.";
+    ui.emptySlots.hidden = false;
+  }
+}
+
+function buildBankContent() {
+  const cap = maxCurrentPoints();
+  if (!Number.isInteger(bank.currentPoints) || bank.currentPoints < 0 || bank.currentPoints > cap) {
+    throw new Error(`보유 포인트는 0부터 ${number(cap)} 사이여야 합니다.`);
+  }
+  const info = derived();
+  const hu = calculateHU();
+  writeInt("tier", "number", bank.tier);
+  writeInt("Point", "current", bank.currentPoints);
+  writeInt("Point", "total", info.totalPoints);
+  writeInt("po", "po", info.drawCount);
+  writeInt("Ora1", "number", bank.equipped[0]);
+  writeInt("Ora2", "number", bank.equipped[1]);
+  writeInt("Ora3", "number", bank.equipped[2]);
+  bank.auraLevels.forEach((level, index) => writeInt(`OOra${index + 1}`, "number", level));
+  writeInt("HU", "number", hu);
+  const serialized = new XMLSerializer().serializeToString(bank.document);
+  return { content: `<?xml version="1.0" encoding="utf-8"?>\r\n${serialized}`, hu, info };
+}
+
+async function saveActiveSlot() {
+  if (!bank) return;
+  const built = buildBankContent();
+  if (!activeSlotId) activeSlotId = createSlotId();
+  const previous = slotRecords.find((slot) => slot.id === activeSlotId);
+  const label = previous?.label ?? `SLOT ${String(slotRecords.length + 1).padStart(2, "0")}`;
+  const record = {
+    id: activeSlotId,
+    label,
+    fingerprint: slotFingerprint(),
+    fileName,
+    bankText: built.content,
+    fileHandle: activeFileHandle ?? previous?.fileHandle ?? null,
+    hasFileHandle: Boolean(activeFileHandle ?? previous?.fileHandle),
+    currentPoints: bank.currentPoints,
+    totalPoints: built.info.totalPoints,
+    ownedCount: built.info.ownedCount,
+    drawCount: built.info.drawCount,
+    hu: built.hu,
+    updatedAt: Date.now()
+  };
+  try {
+    await putBankSlot(record);
+  } catch (error) {
+    if (record.fileHandle) {
+      record.fileHandle = null;
+      record.hasFileHandle = false;
+      await putBankSlot(record);
+    } else {
+      throw error;
+    }
+  }
+  slotRecords = await listBankSlots();
+  renderSlots();
+}
+
+async function openFile(file, handle = null) {
   ui.error.hidden = true;
   if (!file) return;
   if (!/\.sc2bank$/i.test(file.name)) {
@@ -380,8 +497,16 @@ async function openFile(file) {
   }
   try {
     const text = await file.text();
-    loadBankText(text, file.name);
-    showToast("Bank 파일을 불러왔습니다.");
+    const parsed = parseBank(text);
+    const residue = getAccountResidue(parsed);
+    const fingerprint = slotFingerprint(file.name, residue);
+    const existing = slotRecords.find((slot) => slot.fingerprint === fingerprint);
+    loadBankText(text, file.name, {
+      slotId: existing?.id ?? createSlotId(),
+      handle: handle ?? existing?.fileHandle ?? null
+    });
+    await saveActiveSlot();
+    showToast(handle ? "원본 파일을 연결하고 슬롯에 저장했습니다." : "Bank를 슬롯에 저장했습니다.");
   } catch (error) {
     showError(error instanceof Error ? error.message : "파일을 열지 못했습니다.");
   } finally {
@@ -389,7 +514,7 @@ async function openFile(file) {
   }
 }
 
-function loadBankText(text, name = "ACKOPPPPL32Q.SC2Bank") {
+function loadBankText(text, name = "ACKOPPPPL32Q.SC2Bank", options = {}) {
   const parsed = parseBank(text);
   originalText = text;
   originalSnapshot = JSON.stringify({
@@ -399,6 +524,8 @@ function loadBankText(text, name = "ACKOPPPPL32Q.SC2Bank") {
   bank = parsed;
   fileName = name;
   checksumResidue = getAccountResidue(parsed);
+  activeSlotId = options.slotId ?? activeSlotId;
+  activeFileHandle = options.handle ?? null;
   dirty = false;
   query = "";
   filter = "all";
@@ -408,6 +535,75 @@ function loadBankText(text, name = "ACKOPPPPL32Q.SC2Bank") {
   ui.workspace.hidden = false;
   loadStateIntoUI();
   return window.TeamPokerBankEditor?.getState?.() ?? null;
+}
+
+async function openSlot(id) {
+  const slot = await getBankSlot(id);
+  if (!slot) throw new Error("저장 슬롯을 찾을 수 없습니다.");
+  loadBankText(slot.bankText, slot.fileName, { slotId: slot.id, handle: slot.fileHandle ?? null });
+  renderSlots();
+  showToast(`${slot.label}을 불러왔습니다.`);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function chooseOriginalFile() {
+  if (!("showOpenFilePicker" in window)) {
+    ui.fileInput.click();
+    showToast("이 브라우저에서는 직접 덮어쓰기를 지원하지 않아 사본으로 불러옵니다.");
+    return;
+  }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      multiple: false,
+      types: [{ description: "StarCraft II Bank", accept: { "application/xml": [".sc2bank"] } }]
+    });
+    await openFile(await handle.getFile(), handle);
+  } catch (error) {
+    if (error?.name !== "AbortError") showError("원본 파일을 연결하지 못했습니다.");
+  }
+}
+
+async function connectHandleForCurrentBank() {
+  if (!("showOpenFilePicker" in window)) throw new Error("원본 직접 수정은 데스크톱 Chrome 또는 Edge에서 지원됩니다.");
+  const [handle] = await window.showOpenFilePicker({
+    multiple: false,
+    types: [{ description: "StarCraft II Bank", accept: { "application/xml": [".sc2bank"] } }]
+  });
+  const candidateText = await (await handle.getFile()).text();
+  const candidate = parseBank(candidateText);
+  if (getAccountResidue(candidate) !== checksumResidue) {
+    throw new Error("현재 슬롯과 다른 계정의 Bank 파일입니다. 같은 원본 파일을 선택하세요.");
+  }
+  activeFileHandle = handle;
+  await saveActiveSlot();
+  return handle;
+}
+
+async function ensureWritePermission(handle) {
+  if (!handle.queryPermission || !handle.requestPermission) return true;
+  if (await handle.queryPermission({ mode: "readwrite" }) === "granted") return true;
+  return await handle.requestPermission({ mode: "readwrite" }) === "granted";
+}
+
+async function applyToOriginal() {
+  ui.error.hidden = true;
+  try {
+    if (!bank) throw new Error("먼저 Bank 파일이나 슬롯을 여세요.");
+    const handle = activeFileHandle ?? await connectHandleForCurrentBank();
+    if (!await ensureWritePermission(handle)) throw new Error("원본 파일 쓰기 권한이 필요합니다.");
+    const built = buildBankContent();
+    const writable = await handle.createWritable();
+    await writable.write(new Blob([built.content], { type: "application/xml;charset=utf-8" }));
+    await writable.close();
+    originalText = built.content;
+    bank.storedHU = built.hu;
+    dirty = false;
+    await saveActiveSlot();
+    updateSummary();
+    showToast(`HU ${built.hu} · 원본 Bank에 바로 적용했습니다.`);
+  } catch (error) {
+    if (error?.name !== "AbortError") showError(error instanceof Error ? error.message : "원본 파일에 적용하지 못했습니다.");
+  }
 }
 
 function showError(message) {
@@ -426,35 +622,15 @@ function showToast(message) {
 
 function saveBank() {
   try {
-    const cap = maxCurrentPoints();
-    if (!Number.isInteger(bank.currentPoints) || bank.currentPoints < 0 || bank.currentPoints > cap) {
-      throw new Error(`보유 포인트는 0부터 ${number(cap)} 사이여야 합니다.`);
-    }
-    const info = derived();
-    const hu = calculateHU();
-
-    writeInt("tier", "number", bank.tier);
-    writeInt("Point", "current", bank.currentPoints);
-    writeInt("Point", "total", info.totalPoints);
-    writeInt("po", "po", info.drawCount);
-    writeInt("Ora1", "number", bank.equipped[0]);
-    writeInt("Ora2", "number", bank.equipped[1]);
-    writeInt("Ora3", "number", bank.equipped[2]);
-    bank.auraLevels.forEach((level, index) => writeInt(`OOra${index + 1}`, "number", level));
-    writeInt("HU", "number", hu);
-
-    const serialized = new XMLSerializer().serializeToString(bank.document);
-    const content = `<?xml version="1.0" encoding="utf-8"?>\r\n${serialized}`;
-    const blob = new Blob([content], { type: "application/xml;charset=utf-8" });
+    const built = buildBankContent();
+    const blob = new Blob([built.content], { type: "application/xml;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
     link.download = fileName.replace(/\.sc2bank$/i, "_수정.SC2Bank");
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    dirty = false;
-    updateSummary();
-    showToast(`HU ${hu} · 수정본을 저장했습니다.`);
+    showToast(`HU ${built.hu} · 사본을 다운로드했습니다.`);
   } catch (error) {
     showError(error instanceof Error ? error.message : "수정본을 저장하지 못했습니다.");
   }
@@ -467,14 +643,22 @@ async function resetBank() {
   checksumResidue = getAccountResidue(parsed);
   dirty = false;
   loadStateIntoUI();
+  await saveActiveSlot();
   showToast("원본 상태로 되돌렸습니다.");
 }
 
-ui.choose.addEventListener("click", () => ui.fileInput.click());
-ui.changeFile.addEventListener("click", () => ui.fileInput.click());
+ui.choose.addEventListener("click", chooseOriginalFile);
+ui.importButton.addEventListener("click", () => ui.fileInput.click());
+ui.changeFile.addEventListener("click", chooseOriginalFile);
 ui.fileInput.addEventListener("change", () => openFile(ui.fileInput.files?.[0]));
 ui.download.addEventListener("click", saveBank);
+ui.apply.addEventListener("click", applyToOriginal);
 ui.reset.addEventListener("click", resetBank);
+ui.slotGrid.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-open-slot]");
+  if (!button) return;
+  openSlot(button.dataset.openSlot).catch((error) => showError(error.message));
+});
 
 ui.tier.addEventListener("change", () => {
   bank.tier = Number(ui.tier.value);
@@ -504,8 +688,7 @@ ui.ora.forEach((select, index) => select.addEventListener("change", () => {
 
 ui.account.addEventListener("input", () => {
   ui.account.value = ui.account.value.replace(/\D/g, "");
-  updateSummary();
-  if (ui.account.value) markDirty();
+  markDirty();
 });
 
 ui.search.addEventListener("input", () => {
@@ -551,10 +734,20 @@ document.addEventListener("dragleave", () => {
   dragDepth -= 1;
   if (dragDepth <= 0) { dragDepth = 0; ui.overlay.classList.remove("visible"); }
 });
-document.addEventListener("drop", (event) => {
+document.addEventListener("drop", async (event) => {
   dragDepth = 0;
   ui.overlay.classList.remove("visible");
-  openFile(event.dataTransfer?.files?.[0]);
+  const item = event.dataTransfer?.items?.[0];
+  try {
+    const handle = item?.getAsFileSystemHandle ? await item.getAsFileSystemHandle() : null;
+    if (handle?.kind === "file") {
+      await openFile(await handle.getFile(), handle);
+      return;
+    }
+  } catch {
+    // Fall through to a read-only File when a writable handle is unavailable.
+  }
+  await openFile(event.dataTransfer?.files?.[0]);
 });
 
 window.addEventListener("beforeunload", (event) => {
@@ -667,3 +860,4 @@ function registerWebMcpTools() {
 }
 
 registerWebMcpTools();
+refreshSlots();
