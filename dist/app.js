@@ -235,7 +235,11 @@ function writeInt(sectionName, keyName, value) {
 }
 
 function parseBank(text) {
-  const documentNode = new DOMParser().parseFromString(text, "application/xml");
+  // Older editor versions could save two XML declarations. Normalize the
+  // leading declaration so those device-local slots can still be recovered.
+  const body = text.replace(/^\s*(?:<\?xml\b[^?]*\?>\s*)+/i, "");
+  const normalizedText = `<?xml version="1.0" encoding="utf-8"?>\r\n${body}`;
+  const documentNode = new DOMParser().parseFromString(normalizedText, "application/xml");
   if (documentNode.querySelector("parsererror")) throw new Error("XML 형식을 읽을 수 없습니다.");
   if (documentNode.documentElement?.tagName !== "Bank") throw new Error("StarCraft II Bank 파일이 아닙니다.");
   if (documentNode.getElementsByTagName("Signature").length > 0) throw new Error("Blizzard 서명이 있는 Bank 파일은 지원하지 않습니다.");
